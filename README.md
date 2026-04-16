@@ -1,0 +1,1 @@
+# Legibly Scanner

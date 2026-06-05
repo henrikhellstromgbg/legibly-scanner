@@ -5,9 +5,35 @@ const { source: axeSource } = require('axe-core')
 const app = express()
 app.use(express.json())
 
+// Begränsa hur många Chromium-instanser som körs samtidigt. Varje scan
+// startar en egen browser (~150-300 MB), så utan tak spränger samtidiga
+// requests minnet och Render startar om instansen. Köa överskottet.
+const MAX_CONCURRENT_SCANS = Number(process.env.MAX_CONCURRENT_SCANS) || 2
+let activeScans = 0
+const waiting = []
+
+function acquireScanSlot() {
+  if (activeScans < MAX_CONCURRENT_SCANS) {
+    activeScans++
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => waiting.push(resolve))
+}
+
+function releaseScanSlot() {
+  const next = waiting.shift()
+  if (next) {
+    next() // håller activeScans oförändrat, slotten går vidare till nästa i kön
+  } else {
+    activeScans--
+  }
+}
+
 app.post('/scan', async (req, res) => {
   const { url } = req.body
   if (!url) return res.status(400).json({ error: 'URL required' })
+
+  await acquireScanSlot()
 
   let browser
   try {
@@ -81,7 +107,10 @@ app.post('/scan', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message })
   } finally {
-    if (browser) await browser.close()
+    if (browser) {
+      try { await browser.close() } catch { /* redan stängd */ }
+    }
+    releaseScanSlot()
   }
 })
 
